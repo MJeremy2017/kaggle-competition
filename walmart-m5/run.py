@@ -35,3 +35,17 @@ fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 3))
 s.groupby('wday').agg({'count': 'mean'}).plot(kind='line', title='sold count/weekday', ax=ax1)
 s.groupby('month').agg({'count': 'mean'}).plot(kind='line', title='sold count/month', ax=ax2)
 s.groupby('year').agg({'count': 'mean'}).plot(kind='line', title='sold count/year', ax=ax3)
+
+# department sale
+uu = sales_train_eval[['dept_id'] + cols].groupby('dept_id').sum().T.merge(calender.set_index('d')['date'], left_index=True, right_index=True).set_index('date')
+uu.plot(kind='line', figsize=[15, 5], title='total sale by department')
+
+# sales by store
+uu = sales_train_eval[['store_id'] + cols].groupby('store_id').sum().T.merge(calender.set_index('d')['date'], left_index=True, right_index=True).set_index('date')
+uu.plot(kind='line', figsize=[15, 5], title='total sale by store')
+
+# sales by states
+uu = sales_train_eval[['state_id'] + cols].groupby('state_id').sum().T.merge(calender.set_index('d')['date'], left_index=True, right_index=True).set_index('date')
+uu.plot(kind='line', figsize=[15, 5], title='total sale by state')
+uu.rolling(90).mean().plot(kind='line', figsize=[15, 5], title='total sale by state avg 90')
+
