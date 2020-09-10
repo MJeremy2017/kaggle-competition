@@ -106,12 +106,13 @@ df = pd.merge(df, calendar, on='d', how='left')
 df = pd.merge(df, prices, on=['store_id', 'item_id', 'wm_yr_wk'], how='left')
 
 # tree map
-group = sales.groupby(['state_id','store_id','cat_id','dept_id'], as_index=False)['item_id'].count().dropna()
+group = sales.groupby(['state_id', 'store_id', 'cat_id', 'dept_id'], as_index=False)['item_id'].count().dropna()
 group['USA'] = 'United States of America'
-group.rename(columns={'state_id':'State','store_id':'Store','cat_id':'Category','dept_id':'Department','item_id':'Count'},inplace=True)
+group.rename(columns={'state_id': 'State', 'store_id': 'Store', 'cat_id': 'Category', 'dept_id': 'Department',
+                      'item_id': 'Count'}, inplace=True)
 fig = px.treemap(group, path=['USA', 'State', 'Store', 'Category', 'Department'], values='Count',
-                  color='Count',
-                  color_continuous_scale= px.colors.sequential.Sunset,
-                  title='Walmart: Distribution of items')
+                 color='Count',
+                 color_continuous_scale=px.colors.sequential.Sunset,
+                 title='Walmart: Distribution of items')
 fig.update_layout(template='seaborn')
 fig.show()
