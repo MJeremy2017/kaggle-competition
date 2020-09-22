@@ -432,7 +432,7 @@ org_test = pd.read_csv('../input/osic-pulmonary-fibrosis-progression/test.csv')
 
 for i in range(len(org_test)):
     submission.loc[submission['Patient_Week'] == org_test.Patient[i] + '_' + str(org_test.Weeks[i]), 'FVC'] = \
-    org_test.FVC[i]
+        org_test.FVC[i]
     submission.loc[submission['Patient_Week'] == org_test.Patient[i] + '_' + str(org_test.Weeks[i]), 'Confidence'] = 70
 
 submission[["Patient_Week", "FVC", "Confidence"]].to_csv("submission.csv", index=False)
