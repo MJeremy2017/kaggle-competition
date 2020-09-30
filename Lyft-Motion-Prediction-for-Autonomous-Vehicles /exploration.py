@@ -94,3 +94,42 @@ def visualize_trajectory(dataset, index, title="target_positions movement with d
 
 
 visualize_trajectory(semantic_dataset, index=3)
+
+# ANIMATION
+from IPython.display import display, clear_output
+import PIL
+
+dataset = semantic_dataset
+scene_idx = 34
+indexes = dataset.get_scene_indices(scene_idx)
+images = []
+
+for idx in indexes:
+    data = dataset[idx]
+    im = data["image"].transpose(1, 2, 0)
+    im = dataset.rasterizer.to_rgb(im)
+    target_positions_pixels = transform_points(data["target_positions"] + data["centroid"][:2], data["world_to_image"])
+    center_in_pixels = np.asarray(cfg["raster_params"]["ego_center"]) * cfg["raster_params"]["raster_size"]
+    #     draw_trajectory(im, target_positions_pixels, data["target_yaws"], TARGET_POINTS_COLOR)
+    #     clear_output(wait=True)
+    images.append(PIL.Image.fromarray(im[::-1]))
+
+
+def animate_solution(images):
+    def animate(i):
+        im.set_data(images[i])
+        return im,
+
+    fig, ax = plt.subplots()
+    im = ax.imshow(images[0])
+
+    def init():
+        im.set_data(images[0])
+        return im,
+
+    return animation.FuncAnimation(fig, animate, init_func=init, frames=len(images), interval=60, blit=True)
+
+
+anim = animate_solution(images)
+
+HTML(anim.to_jshtml())
