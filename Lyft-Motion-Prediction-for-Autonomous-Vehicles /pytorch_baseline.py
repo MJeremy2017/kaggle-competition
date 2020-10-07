@@ -11,7 +11,7 @@ from typing import Dict
 from l5kit.data import LocalDataManager, ChunkedDataset
 from l5kit.dataset import AgentDataset, EgoDataset
 from l5kit.rasterization import build_rasterizer
-import matplotlib.pyplot as plt
+from l5kit.evaluation import write_pred_csv
 
 DIR_INPUT = "/kaggle/input/lyft-motion-prediction-autonomous-vehicles"
 
@@ -152,3 +152,57 @@ for _ in progress_bar:
 # SAVE MODEL
 if not DEBUG:
     torch.save(model.state_dict(), f'model_resnet50.pth')
+
+
+# PREDICTION
+WEIGHT_FILE = "/kaggle/input/model-resnet50/model_resnet50.pth"
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+model = build_model(cfg)
+model.to(device)
+
+model_state = torch.load(WEIGHT_FILE, map_location=device)
+model.load_state_dict(model_state)
+
+
+# ===== INIT DATASET
+test_cfg = cfg["test_data_loader"]
+
+# Rasterizer
+rasterizer = build_rasterizer(cfg, dm)
+
+# Test dataset/dataloader
+test_zarr = ChunkedDataset(dm.require(test_cfg["key"])).open()
+test_mask = np.load(f"{DIR_INPUT}/scenes/mask.npz")["arr_0"]
+test_dataset = AgentDataset(cfg, test_zarr, rasterizer, agents_mask=test_mask)
+test_dataloader = DataLoader(test_dataset,
+                             shuffle=test_cfg["shuffle"],
+                             batch_size=test_cfg["batch_size"],
+                             num_workers=test_cfg["num_workers"])
+
+
+print(test_dataloader)
+
+model.eval()
+
+future_coords_offsets_pd = []
+timestamps = []
+agent_ids = []
+
+with torch.no_grad():
+    dataiter = tqdm(test_dataloader)
+
+    for data in dataiter:
+        inputs = data["image"].to(device)
+        target_availabilities = data["target_availabilities"].unsqueeze(-1).to(device)
+        targets = data["target_positions"].to(device)
+
+        _, outputs = forward(data, model, device, criterion)
+
+        future_coords_offsets_pd.append(outputs.cpu().numpy().copy())
+        timestamps.append(data["timestamp"].numpy().copy())
+        agent_ids.append(data["track_id"].numpy().copy())
+
+write_pred_csv('submission.csv',
+               timestamps=np.concatenate(timestamps),
+               track_ids=np.concatenate(agent_ids),
+               coords=np.concatenate(future_coords_offsets_pd))
