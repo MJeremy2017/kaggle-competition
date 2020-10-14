@@ -9,7 +9,6 @@ import numpy as np
 import pandas as pd
 import scipy as sp
 
-
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -18,11 +17,13 @@ from IPython.core.display import display, HTML
 # --- plotly ---
 from plotly import tools, subplots
 import plotly.offline as py
+
 py.init_notebook_mode(connected=True)
 import plotly.graph_objs as go
 import plotly.express as px
 import plotly.figure_factory as ff
 import plotly.io as pio
+
 pio.templates.default = "plotly_dark"
 
 # --- models ---
@@ -60,6 +61,7 @@ import torch
 from pathlib import Path
 
 import pytorch_pfn_extras as ppe
+import time
 from math import ceil
 from pytorch_pfn_extras.training import IgniteExtensionsManager
 from pytorch_pfn_extras.training.triggers import MinValueTrigger
@@ -69,11 +71,60 @@ from torch.utils.data import DataLoader
 from torch.utils.data.dataset import Subset
 import pytorch_pfn_extras.training.extensions as E
 
-
 # --- Dataset utils ---
 from typing import Callable
 
 from torch.utils.data.dataset import Dataset
+
+# --- Lyft configs ---
+cfg = {
+    'format_version': 4,
+    'data_path': "/kaggle/input/lyft-motion-prediction-autonomous-vehicles",
+    'model_params': {
+        'model_architecture': 'resnet50',  # 'resnet34',
+        'history_num_frames': 10,
+        'history_step_size': 1,
+        'history_delta_time': 0.1,
+        'future_num_frames': 50,
+        'future_step_size': 1,
+        'future_delta_time': 0.1,
+        'model_name': "model_resnet34_output",
+        'lr': 1e-3,
+        'weight_path': "/kaggle/input/lyft-pretrained-model-hv/model_multi_update_lyft_public.pth",
+        'train': True,  # False,
+        'predict': True
+    },
+
+    'raster_params': {
+        'raster_size': [224, 224],
+        'pixel_size': [0.5, 0.5],
+        'ego_center': [0.25, 0.5],
+        'map_type': 'py_semantic',
+        'satellite_map_key': 'aerial_map/aerial_map.png',
+        'semantic_map_key': 'semantic_map/semantic_map.pb',
+        'dataset_meta_key': 'meta.json',
+        'filter_agents_threshold': 0.5
+    },
+
+    'train_data_loader': {
+        'key': 'scenes/train.zarr',
+        'batch_size': 16,
+        'shuffle': True,
+        'num_workers': 4
+    },
+
+    'test_data_loader': {
+        'key': 'scenes/test.zarr',
+        'batch_size': 32,
+        'shuffle': False,
+        'num_workers': 4
+    },
+
+    'train_params': {
+        'max_num_steps': 101,
+        'checkpoint_every_n_steps': 20,
+    }
+}
 
 
 class TransformDataset(Dataset):
@@ -88,6 +139,7 @@ class TransformDataset(Dataset):
     def __len__(self):
         return len(self.dataset)
 
+
 # LOSS FUNCTION
 # --- Function utils ---
 # Original code from https://github.com/lyft/l5kit/blob/20ab033c01610d711c3d36e1963ecec86e8b85b6/l5kit/l5kit/evaluation/metrics.py
@@ -98,7 +150,7 @@ from torch import Tensor
 
 
 def pytorch_neg_multi_log_likelihood_batch(
-    gt: Tensor, pred: Tensor, confidences: Tensor, avails: Tensor
+        gt: Tensor, pred: Tensor, confidences: Tensor, avails: Tensor
 ) -> Tensor:
     """
     Compute a negative log-likelihood for the multi-modal scenario.
@@ -119,7 +171,8 @@ def pytorch_neg_multi_log_likelihood_batch(
 
     assert gt.shape == (batch_size, future_len, num_coords), f"expected 2D (Time x Coords) array for gt, got {gt.shape}"
     assert confidences.shape == (batch_size, num_modes), f"expected 1D (Modes) array for gt, got {confidences.shape}"
-    assert torch.allclose(torch.sum(confidences, dim=1), confidences.new_ones((batch_size,))), "confidences should sum to 1"
+    assert torch.allclose(torch.sum(confidences, dim=1),
+                          confidences.new_ones((batch_size,))), "confidences should sum to 1"
     assert avails.shape == (batch_size, future_len), f"expected 1D (Time) array for gt, got {avails.shape}"
     # assert all data are valid
     assert torch.isfinite(pred).all(), "invalid value found in pred"
@@ -147,7 +200,7 @@ def pytorch_neg_multi_log_likelihood_batch(
 
 
 def pytorch_neg_multi_log_likelihood_single(
-    gt: Tensor, pred: Tensor, avails: Tensor
+        gt: Tensor, pred: Tensor, avails: Tensor
 ) -> Tensor:
     """
 
@@ -240,23 +293,83 @@ class LyftMultiModel(nn.Module):
         return pred, confidences
 
 
-class LyftMultiRegressor(nn.Module):
-    """Single mode prediction"""
-
-    def __init__(self, predictor, lossfun=pytorch_neg_multi_log_likelihood_batch):
-        super().__init__()
-        self.predictor = predictor
-        self.lossfun = lossfun
-
-    def forward(self, image, targets, target_availabilities):
-        pred, confidences = self.predictor(image)
-        loss = self.lossfun(targets, pred, confidences, target_availabilities)
-        metrics = {
-            "loss": loss.item(),
-            "nll": pytorch_neg_multi_log_likelihood_batch(targets, pred, confidences, target_availabilities).item()
-        }
-        ppe.reporting.report(metrics, self)
-        return loss, metrics
+def forward(data, model, device, criterion=pytorch_neg_multi_log_likelihood_batch):
+    inputs = data["image"].to(device)
+    target_availabilities = data["target_availabilities"].to(device)
+    targets = data["target_positions"].to(device)
+    # Forward pass
+    preds, confidences = model(inputs)
+    loss = criterion(targets, preds, confidences, target_availabilities)
+    return loss, preds, confidences
 
 
-# TRAINING WITH IGNITE
+# DATA SET
+# set env variable for data
+DIR_INPUT = cfg["data_path"]
+os.environ["L5KIT_DATA_FOLDER"] = DIR_INPUT
+dm = LocalDataManager(None)
+
+train_cfg = cfg["train_data_loader"]
+rasterizer = build_rasterizer(cfg, dm)
+train_zarr = ChunkedDataset(dm.require(train_cfg["key"])).open()
+train_dataset = AgentDataset(cfg, train_zarr, rasterizer)
+train_dataloader = DataLoader(train_dataset, shuffle=train_cfg["shuffle"], batch_size=train_cfg["batch_size"],
+                              num_workers=train_cfg["num_workers"])
+print("==================================TRAIN DATA==================================")
+print(train_dataset)
+
+# TRAINING
+# ==== INIT MODEL=================
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+model = LyftMultiModel(cfg)
+
+# load weight if there is a pretrained model
+# weight_path = cfg["model_params"]["weight_path"]
+# if weight_path:
+#     model.load_state_dict(torch.load(weight_path))
+
+model.to(device)
+optimizer = optim.Adam(model.parameters(), lr=cfg["model_params"]["lr"])
+print(f'device {device}')
+
+# ==== TRAINING LOOP =========================================================
+if cfg["model_params"]["train"]:
+
+    tr_it = iter(train_dataloader)
+    progress_bar = tqdm(range(cfg["train_params"]["max_num_steps"]))
+    num_iter = cfg["train_params"]["max_num_steps"]
+    losses_train = []
+    iterations = []
+    metrics = []
+    times = []
+    model_name = cfg["model_params"]["model_name"]
+    start = time.time()
+    for i in progress_bar:
+        try:
+            data = next(tr_it)
+        except StopIteration:
+            tr_it = iter(train_dataloader)
+            data = next(tr_it)
+        model.train()
+        torch.set_grad_enabled(True)
+
+        loss, _, _ = forward(data, model, device)
+
+        # Backward pass
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        losses_train.append(loss.item())
+
+        progress_bar.set_description(f"loss: {loss.item()} loss(avg): {np.mean(losses_train)}")
+        if i % cfg['train_params']['checkpoint_every_n_steps'] == 0:
+            torch.save(model.state_dict(), f'{model_name}_{i}.pth')
+            iterations.append(i)
+            metrics.append(np.mean(losses_train))
+            times.append((time.time() - start) / 60)
+
+    results = pd.DataFrame({'iterations': iterations, 'metrics (avg)': metrics, 'elapsed_time (mins)': times})
+    results.to_csv(f"train_metrics_{model_name}_{num_iter}.csv", index=False)
+    print(f"Total training time is {(time.time() - start) / 60} mins")
+    print(results.head())
